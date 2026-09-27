@@ -62,6 +62,25 @@ describe("renderSummaryMarkdown", () => {
     expect(markdown).not.toContain("| Soroban |");
   });
 
+  it("keeps the surface table ordered xdr, rpc, soroban when results arrive shuffled", () => {
+    // Deliberately unordered: soroban and rpc before xdr, so this cannot
+    // pass merely by echoing the order of `report.results`.
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "pass",
+        counts: { total: 3, passed: 3, failed: 0, warnings: 0, errors: 0, skipped: 0 },
+        results: [
+          result({ testId: "soroban-one", surface: "soroban", fixtureId: "soroban-one" }),
+          result({ testId: "rpc-one", surface: "rpc", fixtureId: "rpc-one" }),
+          result({ testId: "xdr-one", surface: "xdr", fixtureId: "xdr-one" }),
+        ],
+      }),
+    );
+
+    const surfaceRows = [...markdown.matchAll(/^\| (XDR|RPC|Soroban) \|/gm)].map((match) => match[1]);
+    expect(surfaceRows).toEqual(["XDR", "RPC", "Soroban"]);
+  });
+
   it("lists skipped fixtures in a collapsible section when present", () => {
     const markdown = renderSummaryMarkdown(
       report({
@@ -70,6 +89,38 @@ describe("renderSummaryMarkdown", () => {
     );
     expect(markdown).toContain("<details><summary>Skipped fixtures</summary>");
     expect(markdown).toContain("p27-xdr-legacy");
+  });
+
+  it("renders the network name with the observed protocol suffix when both are present", () => {
+    // `network` is populated whenever a network/rpc-url is used (see the
+    // example workflows), so this branch is not an edge case: the
+    // "— observed protocol N" suffix is the part most likely to regress
+    // silently.
+    const markdown = renderSummaryMarkdown(
+      report({
+        network: { name: "testnet", observedProtocol: 28 },
+        results: [result({ testId: "a", surface: "rpc", fixtureId: "a" })],
+      }),
+    );
+
+    expect(markdown).toContain("Network: testnet — observed protocol 28");
+  });
+
+  it("renders the network name without the suffix when observedProtocol is absent", () => {
+    const markdown = renderSummaryMarkdown(
+      report({
+        network: { name: "testnet" },
+        results: [result({ testId: "a", surface: "rpc", fixtureId: "a" })],
+      }),
+    );
+
+    expect(markdown).toContain("Network: testnet\n");
+    expect(markdown).not.toContain("observed protocol");
+  });
+
+  it("omits the network line entirely when the report has no network", () => {
+    const markdown = renderSummaryMarkdown(report({}));
+    expect(markdown).not.toContain("Network:");
   });
 
   it("never fabricates a result: an empty results array renders as a trivial pass with no surface rows", () => {
