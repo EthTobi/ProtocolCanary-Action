@@ -120,6 +120,14 @@ describe("resolveVersion", () => {
     await expect(resolveVersion("0.1.0")).resolves.toMatchObject({ commitSha: undefined });
   });
 
+  it("degrades to commitSha undefined on well-formed JSON of an unexpected shape, never throwing", async () => {
+    // GitHub returns 200-shaped error bodies for some proxied failures; the
+    // tags list contract (an array) must reject them the same way, and
+    // InstallationFailedError stays confined to `cargo install` in canary.ts.
+    mockHttpsPages([{ body: '{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest"}' }]);
+    await expect(resolveVersion("0.1.0")).resolves.toMatchObject({ commitSha: undefined });
+  });
+
   it("sends an Authorization: Bearer header when an explicit token is supplied", async () => {
     const calls = mockHttpsPages([{ body: tagsBody([{ name: "v0.1.0", sha: "abc123" }]) }]);
     await resolveVersion("0.1.0", { token: "ghp_explicit" });
@@ -174,5 +182,29 @@ describe("resolveVersion", () => {
       { body: tagsBody([{ name: "v9.9.8", sha: "yyy" }]) },
     ]);
     await expect(resolveVersion("0.1.0")).resolves.toMatchObject({ commitSha: undefined });
+  });
+
+  it("caps pagination at MAX_TAG_PAGES when the Link header never terminates", async () => {
+    // A malformed or hostile Link header must spin the page walk forever;
+    // every request re-serves this page, so the loop has to stop itself.
+    const calls = mockHttpsPages([{ body: tagsBody([{ name: "v9.9.9", sha: "zzz" }]), link: nextLink(2) }]);
+    await expect(resolveVersion("0.1.0")).resolves.toMatchObject({ commitSha: undefined });
+    expect(calls).toHaveLength(50);
+  });
+
+  it.each([
+    ["a missing commit object", [{ name: "v0.1.0" }]],
+    ["an empty commit.sha", [{ name: "v0.1.0", commit: { sha: "" } }]],
+    ["a non-string commit.sha", [{ name: "v0.1.0", commit: { sha: 123 } }]],
+  ])("degrades to commitSha undefined when the matched tag has %s, never throwing", async (_shape, tags) => {
+    // Distinct from "tag not found": the tag *is* present, but the entry has
+    // an unexpected GitHub API shape. resolveTagCommit rejects, yet
+    // resolveVersion's "never throws" contract still requires it to resolve
+    // with commitSha undefined and fall back to tag pinning.
+    // Uses the paginating mockHttpsPages helper so a matching tag on the first
+    // page needs no Link header, mirroring the not-found cases above.
+    mockHttpsPages([{ body: JSON.stringify(tags) }]);
+    const resolved = await resolveVersion("0.1.0");
+    expect(resolved).toEqual({ version: "0.1.0", tag: "v0.1.0", commitSha: undefined });
   });
 });
