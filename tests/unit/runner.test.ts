@@ -1,11 +1,12 @@
-import { ChildProcess } from "node:child_process";
+import type * as childProcess from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CanaryExecutionFailedError, TimeoutError } from "../../src/errors";
-import { ActionInputs } from "../../src/inputs";
+import type { ActionInputs } from "../../src/inputs";
 import { buildCheckArgs, runCheck } from "../../src/runner";
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
@@ -14,7 +15,7 @@ const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
 // pass-through of the real implementation; the timeout-escalation tests below
 // swap in a fake child via `mockImplementationOnce`.
 vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
+  const actual = await importOriginal<typeof childProcess>();
   spawnMock.mockImplementation(actual.spawn);
   return { ...actual, spawn: spawnMock };
 });
@@ -63,6 +64,33 @@ describe("buildCheckArgs", () => {
   it("omits optional flags that were not provided", () => {
     const args = buildCheckArgs({ ...BASE_INPUTS, protocol: undefined });
     expect(args).not.toContain("--protocol");
+  });
+
+  it("omits --network specifically when only network is left unset", () => {
+    // Every optional flag is guarded by its own independent `if` in
+    // `buildCheckArgs`, so a refactor that starts always pushing --network
+    // (e.g. as an empty string) must still be caught here, with the other
+    // optional inputs deliberately left set.
+    const args = buildCheckArgs({
+      ...BASE_INPUTS,
+      network: undefined,
+      rpcUrl: "https://soroban-testnet.stellar.org",
+      config: ".stellar-canary.toml",
+    });
+    expect(args).not.toContain("--network");
+    expect(args).not.toContain("");
+    // The flags that *were* provided are still forwarded, so this cannot
+    // pass by an implementation that drops every optional argument.
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "--protocol",
+        "28",
+        "--rpc-url",
+        "https://soroban-testnet.stellar.org",
+        "--config",
+        ".stellar-canary.toml",
+      ]),
+    );
   });
 
   it("forwards network, rpc-url, and config as separate arguments", () => {
@@ -129,6 +157,45 @@ describe("runCheck", () => {
     await expect(runCheck(path.join(__dirname, "does-not-exist"), ["check"], 5000)).rejects.toThrow(
       CanaryExecutionFailedError,
     );
+  });
+});
+
+describe("runCheck signal handling", () => {
+  it("resolves with a null exit code and the signal when the child is killed by a signal", async () => {
+    // This exercises the `close` branch where `exitCode` is null and a real
+    // signal is set, without going through the timeout path: the child
+    // terminates itself with SIGTERM.
+    const result = await runCheck(process.execPath, ["-e", "process.kill(process.pid, 'SIGTERM')"], 5000);
+    expect(result.exitCode).toBeNull();
+    expect(result.signal).toBe("SIGTERM");
+  });
+
+  it("forwards a cancellation signal to the child and removes its listeners on settle", async () => {
+    process.env.MOCK_CANARY_SCENARIO = "timeout";
+    const baselineInt = process.listenerCount("SIGINT");
+    const baselineTerm = process.listenerCount("SIGTERM");
+
+    // runCheck registers its signal-forwarding listeners synchronously
+    // inside the promise executor, so they are present the moment it returns.
+    const pending = runCheck(MOCK_CANARY, ["check"], 8000);
+    expect(process.listenerCount("SIGINT")).toBe(baselineInt + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(baselineTerm + 1);
+
+    // Invoke the forwarding listener the way the OS would, proving the
+    // signal reaches the child: the child dies from SIGINT, so the close
+    // event reports a null exit code with the signal set and runCheck
+    // resolves rather than rejecting.
+    const listeners = process.rawListeners("SIGINT");
+    const forwardSignal = listeners[listeners.length - 1] as (signal: NodeJS.Signals) => void;
+    forwardSignal("SIGINT");
+
+    const result = await pending;
+    expect(result.exitCode).toBeNull();
+    expect(result.signal).toBe("SIGINT");
+
+    // cleanup() removed both forwarding listeners: no leak across runs.
+    expect(process.listenerCount("SIGINT")).toBe(baselineInt);
+    expect(process.listenerCount("SIGTERM")).toBe(baselineTerm);
   });
 });
 

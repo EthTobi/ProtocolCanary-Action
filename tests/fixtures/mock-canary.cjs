@@ -11,6 +11,15 @@
  */
 "use strict";
 
+// @ts-check
+
+/**
+ * @typedef {import("../../src/output").CanaryReport} CanaryReport
+ * @typedef {import("../../src/output").CanaryResult} CanaryResult
+ * @typedef {import("../../src/output").CanarySkip} CanarySkip
+ * @typedef {import("../../src/output").CanaryCounts} CanaryCounts
+ */
+
 const args = process.argv.slice(2);
 const scenario = process.env.MOCK_CANARY_SCENARIO ?? "pass";
 const version = process.env.MOCK_CANARY_VERSION ?? "0.1.0";
@@ -29,9 +38,9 @@ const version = process.env.MOCK_CANARY_VERSION ?? "0.1.0";
  * writes nothing and does not exit, so callers are free to adjust the
  * object before producing output.
  *
- * @param {object} [overrides] Top-level fields to merge over the defaults,
+ * @param {Partial<CanaryReport>} [overrides] Top-level fields to merge over the defaults,
  *   e.g. `{ status: "fail", counts: {...}, results: [...] }`.
- * @returns {object} A fresh report object; the caller owns it.
+ * @returns {CanaryReport} A fresh report object; the caller owns it.
  */
 function baseReport(overrides) {
   return Object.assign(
@@ -58,7 +67,7 @@ function baseReport(overrides) {
  * Because it exits, it never returns to the `switch` case that called it;
  * the `break` statements after each call are kept only for readability.
  *
- * @param {object} report The report to serialize, normally built by
+ * @param {CanaryReport} report The report to serialize, normally built by
  *   {@link baseReport}.
  * @param {number} exitCode Exit code to terminate with, per the contract in
  *   `src/output.ts`: 0 pass, 1 compatibility_failure, 3 execution_error.
@@ -138,7 +147,10 @@ switch (scenario) {
         },
       ],
     });
-    delete report.counts;
+    // Delete `counts` to simulate the older report shape. `counts` is readonly in
+    // `CanaryReport`, so cast to `any` to allow deletion without a type error
+    // when this file is checked with `// @ts-check` / `checkJs`.
+    delete /** @type {any} */ (report).counts;
     emit(report, 0);
     break;
   }
@@ -243,6 +255,33 @@ switch (scenario) {
       process.stdout.write(JSON.stringify(baseReport({})) + "\n");
       process.exit(0);
     }, 10_000);
+    break;
+  }
+
+  case "many-failures": {
+    // Simulates a report with more failures than GitHub's per-job annotation limit (50).
+    // This tests that the job summary still lists all results even when annotations are truncated.
+    const manyResults = [];
+    for (let i = 1; i <= 60; i++) {
+      manyResults.push({
+        testId: `p28-xdr-many-${i}`,
+        protocol: 28,
+        surface: "xdr",
+        status: "fail",
+        summary: `failure ${i}`,
+        details: `detail for failure ${i}`,
+        durationMs: 1,
+        fixtureId: `p28-xdr-many-${i}`,
+      });
+    }
+    emit(
+      baseReport({
+        status: "fail",
+        counts: { total: 60, passed: 0, failed: 60, warnings: 0, errors: 0, skipped: 0 },
+        results: manyResults,
+      }),
+      1,
+    );
     break;
   }
 
