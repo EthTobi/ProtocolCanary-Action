@@ -1,11 +1,12 @@
-import { ChildProcess } from "node:child_process";
+import type * as childProcess from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CanaryExecutionFailedError, TimeoutError } from "../../src/errors";
-import { ActionInputs } from "../../src/inputs";
+import type { ActionInputs } from "../../src/inputs";
 import { buildCheckArgs, runCheck } from "../../src/runner";
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
@@ -14,7 +15,7 @@ const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
 // pass-through of the real implementation; the timeout-escalation tests below
 // swap in a fake child via `mockImplementationOnce`.
 vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
+  const actual = await importOriginal<typeof childProcess>();
   spawnMock.mockImplementation(actual.spawn);
   return { ...actual, spawn: spawnMock };
 });
@@ -156,6 +157,74 @@ describe("runCheck", () => {
     await expect(runCheck(path.join(__dirname, "does-not-exist"), ["check"], 5000)).rejects.toThrow(
       CanaryExecutionFailedError,
     );
+  });
+
+  // `process` is a process-wide EventEmitter shared by every runCheck call
+  // in the host process, so a leaked forwardSignal listener would accumulate
+  // across repeated runs (eventually tripping Node's
+  // MaxListenersExceededWarning). These tests pin the contract that the
+  // listeners registered before spawning are removed once the promise
+  // settles, whichever way it settles.
+  describe("signal listener hygiene", () => {
+    const SIGNALS = ["SIGINT", "SIGTERM"] as const;
+
+    function snapshotListenerCounts(): Record<(typeof SIGNALS)[number], number> {
+      const counts: Record<(typeof SIGNALS)[number], number> = { SIGINT: 0, SIGTERM: 0 };
+      for (const signal of SIGNALS) {
+        counts[signal] = process.listenerCount(signal);
+      }
+      return counts;
+    }
+
+    it("registers its signal listeners while running and removes them after a successful run", async () => {
+      process.env.MOCK_CANARY_SCENARIO = "pass";
+      const before = snapshotListenerCounts();
+
+      const pending = run();
+
+      // process.on(...) runs synchronously inside runCheck's Promise
+      // executor, so exactly one listener per signal is present immediately.
+      for (const signal of SIGNALS) {
+        expect(process.listenerCount(signal)).toBe(before[signal] + 1);
+      }
+
+      const result = await pending;
+      expect(result.exitCode).toBe(0);
+
+      // cleanup() must restore the pre-run counts exactly.
+      for (const signal of SIGNALS) {
+        expect(process.listenerCount(signal)).toBe(before[signal]);
+      }
+    });
+
+    it("removes its signal listeners after a rejected run (timeout)", async () => {
+      process.env.MOCK_CANARY_SCENARIO = "timeout";
+      const before = snapshotListenerCounts();
+
+      const pending = runCheck(MOCK_CANARY, ["check"], 200);
+
+      for (const signal of SIGNALS) {
+        expect(process.listenerCount(signal)).toBe(before[signal] + 1);
+      }
+
+      await expect(pending).rejects.toThrow(TimeoutError);
+
+      for (const signal of SIGNALS) {
+        expect(process.listenerCount(signal)).toBe(before[signal]);
+      }
+    });
+
+    it("removes its signal listeners when the binary cannot be started", async () => {
+      const before = snapshotListenerCounts();
+
+      await expect(runCheck(path.join(__dirname, "does-not-exist"), ["check"], 5000)).rejects.toThrow(
+        CanaryExecutionFailedError,
+      );
+
+      for (const signal of SIGNALS) {
+        expect(process.listenerCount(signal)).toBe(before[signal]);
+      }
+    });
   });
 });
 
