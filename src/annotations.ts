@@ -23,6 +23,13 @@ export function emitAnnotations(report: CanaryReport): void {
   }
 }
 
+/**
+ * Emits a workflow-level error annotation when Canary could not be executed
+ * or did not produce a usable report. Use this for execution failures
+ * (install, process, timeout, or parse errors) instead of `emitAnnotations`,
+ * which annotates individual results from a report. Like `emitAnnotations`,
+ * this never attaches a file/line location.
+ */
 export function emitExecutionFailureAnnotation(reason: string): void {
   core.error(`Protocol Canary could not be executed: ${reason}`, { title: TITLE });
 }
