@@ -58,8 +58,8 @@ export interface ResolveVersionOptions {
  * possible, the immutable commit it currently points to. Never throws:
  * every tag-lookup failure — non-200 responses, malformed JSON, valid JSON
  * of an unexpected shape, or a missing tag — degrades to
- * `commitSha: undefined` and only surfaces as a debug log, falling back to
- * tag pinning. Installation failures proper are reported separately, as
+ * `commitSha: undefined`. Missing tags are surfaced as warnings; other
+ * lookup failures are debug-logged. Installation failures proper are reported separately, as
  * `InstallationFailedError` thrown from `src/canary.ts`. */
 export async function resolveVersion(
   version: string,
@@ -67,6 +67,14 @@ export async function resolveVersion(
 ): Promise<ResolvedVersion> {
   const tag = `v${version}`;
   const commitSha = await resolveTagCommit(tag, options.token).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes(`tag ${tag} not found in ${CANARY_REPO_OWNER}/${CANARY_REPO_NAME} tags`)) {
+      core.warning(
+        `Could not find upstream tag ${tag}. This usually means the requested version ${version} is mistyped or not yet published; falling back to tag-only pinning.`,
+      );
+      return undefined;
+    }
+
     core.debug(`Could not resolve ${tag} to a commit sha, falling back to tag pinning: ${String(error)}`);
     return undefined;
   });
